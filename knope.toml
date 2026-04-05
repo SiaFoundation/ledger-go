@@ -1,10 +1,7 @@
 [package]
 changelog = "CHANGELOG.md"
 versioned_files = ["go.mod"]
-assets = "marker"
-
-[bot.releases]
-enabled = true
+ignore_go_major_versioning = true
 
 [[workflows]]
 name = "document-change"
@@ -37,14 +34,14 @@ command = "git push --force --set-upstream origin release"
 
 [[workflows.steps]]
 type = "CreatePullRequest"
-base = "master"
+base = "main"
 
 [workflows.steps.title]
 template = "chore: prepare release $version"
 variables = { "$version" = "Version" }
 
 [workflows.steps.body]
-template = "This PR was created automatically. Merging it will finalize the changelog for $version\n\n$changelog"
+template = "This PR was created automatically. Merging it will create a new release for $version\n\n$changelog"
 variables = { "$changelog" = "ChangelogEntry", "$version" = "Version" }
 
 [[workflows]]
@@ -55,4 +52,4 @@ type = "Release"
 
 [github]
 owner = "SiaFoundation"
-repo = "walletd"
+repo = "ledger-go"

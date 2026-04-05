@@ -1,3 +1,5 @@
+//go:build ledger
+
 package ledger_test
 
 import (
