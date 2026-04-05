@@ -206,14 +206,6 @@ func (n *Device) exchangeTxnHash(op byte, data []byte, p2 byte, sigIndex uint16,
 	return
 }
 
-// Close closes the connection to the device.
-func (n *Device) Close() error {
-	if n.closer != nil {
-		return n.closer.Close()
-	}
-	return nil
-}
-
 func (n *Device) exchange(cmd byte, p1, p2 byte, data []byte) (resp []byte, err error) {
 	resp, err = n.ex.Exchange(apdu{
 		CLA:     0xe0,
@@ -240,6 +232,14 @@ func (n *Device) exchange(cmd byte, p1, p2 byte, data []byte) (resp []byte, err 
 		err = errCode(code)
 	}
 	return
+}
+
+// Close closes the connection to the device.
+func (n *Device) Close() error {
+	if n.closer != nil {
+		return n.closer.Close()
+	}
+	return nil
 }
 
 // GetVersion returns the version of the Sia app running on the device.
