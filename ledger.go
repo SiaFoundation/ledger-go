@@ -1,3 +1,8 @@
+// Package ledger provides an interface to a Ledger hardware wallet running the Sia app.
+//
+// It allows you to get the app version, retrieve public keys and addresses, and
+// sign transaction hashes. The device must be connected and the Sia app must be
+// open for these operations to work.
 package ledger
 
 import (
@@ -380,40 +385,40 @@ func encodeV2Txn(txn types.V2Transaction) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func enumerate() (string, error) {
+func findDevice(serial string) (hid.DeviceInfo, bool) {
 	devices := hid.Enumerate(ledgerVendorID, 0)
 	for _, d := range devices {
-		if d.UsagePage == ledgerUsagePage {
-			return d.Path, nil
-		}
-	}
-	return "", errors.New("device not detected")
-}
-
-func openDevice(path string) (*Device, error) {
-	devices := hid.Enumerate(ledgerVendorID, 0)
-	for _, d := range devices {
-		if d.Path != path {
+		if d.UsagePage != ledgerUsagePage {
+			continue
+		} else if serial != "" && d.Serial != serial {
 			continue
 		}
-		device, err := d.Open()
-		if err != nil {
-			return nil, err
-		}
-		return &Device{
-			ex: &apduFramer{
-				hf: &hidFramer{
-					rw: device,
-				},
-			},
-			closer: device,
-		}, nil
+		return d, true
 	}
-	return nil, errors.New("device not found")
+	return hid.DeviceInfo{}, false
 }
 
-func openApp(path string) error {
-	n, err := openDevice(path)
+func openDevice(serial string) (*Device, string, error) {
+	d, ok := findDevice(serial)
+	if !ok {
+		return nil, "", errors.New("device not found")
+	}
+	device, err := d.Open()
+	if err != nil {
+		return nil, "", err
+	}
+	return &Device{
+		ex: &apduFramer{
+			hf: &hidFramer{
+				rw: device,
+			},
+		},
+		closer: device,
+	}, d.Serial, nil
+}
+
+func openApp(serial string) error {
+	n, _, err := openDevice(serial)
 	if err != nil {
 		return err
 	}
@@ -431,12 +436,7 @@ func openApp(path string) error {
 // Open finds a Ledger device, ensures the Sia app is running, and returns a
 // connected Device instance.
 func Open() (*Device, error) {
-	path, err := enumerate()
-	if err != nil {
-		return nil, err
-	}
-
-	n, err := openDevice(path)
+	n, serial, err := openDevice("")
 	if err != nil {
 		return nil, err
 	}
@@ -448,15 +448,16 @@ func Open() (*Device, error) {
 	n.Close()
 
 	// open the Sia app; the device disconnects and reconnects
-	if err := openApp(path); err != nil {
+	if err := openApp(serial); err != nil {
 		return nil, fmt.Errorf("failed to open Sia app: %w", err)
 	}
 
-	// poll for the device to reappear
+	// ledger disconnects and reconnects when an app is opened. Polls for it and
+	// checks that the Sia app is open.
 	for range 10 {
 		time.Sleep(500 * time.Millisecond)
 
-		n, err = openDevice(path)
+		n, _, err = openDevice(serial)
 		if err != nil {
 			continue
 		}
