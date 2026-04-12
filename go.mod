@@ -4,7 +4,7 @@ go 1.26.1
 
 require (
 	github.com/bearsh/hid v1.6.0
-	go.sia.tech/core v0.19.1-0.20260326151920-bbeb92b26458
+	go.sia.tech/core v0.19.1
 )
 
 require (
