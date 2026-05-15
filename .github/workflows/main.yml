@@ -5,8 +5,44 @@ on:
     branches:
       - main
 
+env:
+  CGO_ENABLED: 1
+
 jobs:
   test:
-    uses: SiaFoundation/workflows/.github/workflows/go-test.yml@22e56c0750c0febb09784caa01c60021e0b5f111 # master
-    with:
-      try-build: false
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        go-version: [1.25, 1.26]
+        os: [tenki-standard-medium-4c-8g, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Configure Git # required for golangci-lint on Windows
+        if: startsWith(matrix.os, 'windows')
+        shell: bash
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: ${{ matrix.go-version }}
+      - name: Install HID build dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libusb-1.0-0-dev libudev-dev pkg-config
+      - name: Lint
+        uses: golangci/golangci-lint-action@4afd733a84b1f43292c63897423277bb7f4313a9 # v8
+        with:
+          skip-cache: true
+      - name: Test
+        uses: n8maninger/action-golang-test@aa292dc81b16d34406a9551e629e0cdca00d9418 # v2
+        with:
+          args: -race;-tags=testing netgo
+
+  success: # Use in branch rulesets to ensure all matrix jobs completed successfully
+    needs: test
+    runs-on: tenki-standard-small-2c-4g
+    steps:
+      - run: echo "Success!"
