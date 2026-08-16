@@ -19,7 +19,8 @@ import (
 )
 
 const (
-	appName = "Sia"
+	appName       = "Sia"
+	dashboardName = "BOLOS"
 
 	ledgerVendorID  = 0x2c97
 	ledgerUsagePage = 0xFFA0
@@ -28,11 +29,20 @@ const (
 	codeUserRejected = 0x6985
 	codeInvalidParam = 0x6b01
 
+	claApp = 0xe0
+	// claOS instructions are handled by the operating system from both the
+	// dashboard and inside apps
+	claOS = 0xb0
+
 	cmdGetVersion    = 0x01
 	cmdGetPublicKey  = 0x02
 	cmdSignHash      = 0x04
 	cmdCalcTxnHash   = 0x08
 	cmdCalcV2TxnHash = 0x10
+	cmdOpenApp       = 0xd8
+
+	cmdGetAppAndVersion = 0x01
+	cmdQuitApp          = 0xa7
 
 	p1First = 0x00
 	p1More  = 0x80
@@ -198,7 +208,7 @@ func (n *Device) exchangeTxnHash(op byte, data []byte, p2 byte, sigIndex uint16,
 		if resp == nil {
 			p1 = p1First
 		}
-		resp, err = n.exchange(op, p1, p2, buf.Next(255))
+		resp, err = n.exchange(claApp, op, p1, p2, buf.Next(255))
 		if err != nil {
 			return nil, err
 		}
@@ -206,9 +216,9 @@ func (n *Device) exchangeTxnHash(op byte, data []byte, p2 byte, sigIndex uint16,
 	return
 }
 
-func (n *Device) exchange(cmd byte, p1, p2 byte, data []byte) (resp []byte, err error) {
+func (n *Device) exchange(cla, cmd, p1, p2 byte, data []byte) (resp []byte, err error) {
 	resp, err = n.ex.Exchange(apdu{
-		CLA:     0xe0,
+		CLA:     cla,
 		INS:     cmd,
 		P1:      p1,
 		P2:      p2,
@@ -234,6 +244,43 @@ func (n *Device) exchange(cmd byte, p1, p2 byte, data []byte) (resp []byte, err 
 	return
 }
 
+// getAppAndVersion returns the name and version of the app in the foreground,
+// or the dashboard name ("BOLOS") and operating system version if no app is
+// open.
+func (n *Device) getAppAndVersion() (name, version string, err error) {
+	resp, err := n.exchange(claOS, cmdGetAppAndVersion, 0, 0, nil)
+	if err != nil {
+		return "", "", err
+	}
+	// format byte, then length-prefixed name and version
+	if len(resp) < 2 {
+		return "", "", errors.New("app and version response too short")
+	}
+	nameLen := int(resp[1])
+	if len(resp) < 3+nameLen {
+		return "", "", errors.New("app and version response too short")
+	}
+	versionLen := int(resp[2+nameLen])
+	if len(resp) < 3+nameLen+versionLen {
+		return "", "", errors.New("app and version response too short")
+	}
+	return string(resp[2 : 2+nameLen]), string(resp[3+nameLen : 3+nameLen+versionLen]), nil
+}
+
+// openApp launches the Sia app from the device's dashboard. The device
+// disconnects and reconnects when the app opens.
+func (n *Device) openApp() error {
+	_, err := n.exchange(claApp, cmdOpenApp, 0, 0, []byte(appName))
+	return err
+}
+
+// quitApp exits the app in the foreground and returns to the dashboard. The
+// device disconnects and reconnects when the app quits.
+func (n *Device) quitApp() error {
+	_, err := n.exchange(claOS, cmdQuitApp, 0, 0, nil)
+	return err
+}
+
 // Close closes the connection to the device.
 func (n *Device) Close() error {
 	if n.closer != nil {
@@ -244,7 +291,7 @@ func (n *Device) Close() error {
 
 // GetVersion returns the version of the Sia app running on the device.
 func (n *Device) GetVersion() (version string, err error) {
-	resp, err := n.exchange(cmdGetVersion, 0, 0, nil)
+	resp, err := n.exchange(claApp, cmdGetVersion, 0, 0, nil)
 	if err != nil {
 		return "", err
 	} else if len(resp) != 3 {
@@ -258,7 +305,7 @@ func (n *Device) GetPublicKey(index uint32) (pubkey types.PublicKey, err error) 
 	encIndex := make([]byte, 4)
 	binary.LittleEndian.PutUint32(encIndex, index)
 
-	resp, err := n.exchange(cmdGetPublicKey, 0, p2DisplayPubkey, encIndex)
+	resp, err := n.exchange(claApp, cmdGetPublicKey, 0, p2DisplayPubkey, encIndex)
 	if err != nil {
 		return types.PublicKey{}, err
 	}
@@ -274,7 +321,7 @@ func (n *Device) GetAddress(index uint32) (addr types.Address, err error) {
 	encIndex := make([]byte, 4)
 	binary.LittleEndian.PutUint32(encIndex, index)
 
-	resp, err := n.exchange(cmdGetPublicKey, 0, p2DisplayAddress, encIndex)
+	resp, err := n.exchange(claApp, cmdGetPublicKey, 0, p2DisplayAddress, encIndex)
 	if err != nil {
 		return types.Address{}, err
 	}
@@ -287,7 +334,7 @@ func (n *Device) SignHash(hash [32]byte, keyIndex uint32) (sig types.Signature, 
 	encIndex := make([]byte, 4)
 	binary.LittleEndian.PutUint32(encIndex, keyIndex)
 
-	resp, err := n.exchange(cmdSignHash, 0, 0, append(encIndex, hash[:]...))
+	resp, err := n.exchange(claApp, cmdSignHash, 0, 0, append(encIndex, hash[:]...))
 	if err != nil {
 		return types.Signature{}, err
 	}
@@ -417,55 +464,57 @@ func openDevice(serial string) (*Device, string, error) {
 	}, d.Serial, nil
 }
 
-func openApp(serial string) error {
-	n, _, err := openDevice(serial)
-	if err != nil {
-		return err
+// isStatusErr reports whether err is a status word returned by the device.
+func isStatusErr(err error) bool {
+	var code errCode
+	return errors.Is(err, errUserRejected) || errors.Is(err, errInvalidParam) || errors.As(err, &code)
+}
+
+// reconnect reopens the device after it disconnects.
+func reconnect(serial string) (*Device, error) {
+	for range 10 {
+		time.Sleep(500 * time.Millisecond)
+		if n, _, err := openDevice(serial); err == nil {
+			return n, nil
+		}
 	}
-	defer n.Close()
-	n.ex.Exchange(apdu{
-		CLA:     0xE0,
-		INS:     0xD8,
-		P1:      0x00,
-		P2:      0x00,
-		Payload: []byte(appName),
-	})
-	return nil
+	return nil, errors.New("Ledger did not reconnect")
 }
 
 // Open finds a Ledger device, ensures the Sia app is running, and returns a
-// connected Device instance.
+// connected Device instance. If another app is in the foreground, it is quit
+// and the Sia app is launched from the dashboard.
 func Open() (*Device, error) {
 	n, serial, err := openDevice("")
 	if err != nil {
 		return nil, err
 	}
 
-	// if the Sia app is already running, return immediately
-	if _, err := n.GetVersion(); err == nil {
-		return n, nil
-	}
-	n.Close()
-
-	// open the Sia app; the device disconnects and reconnects
-	if err := openApp(serial); err != nil {
-		return nil, fmt.Errorf("failed to open Sia app: %w", err)
-	}
-
-	// ledger disconnects and reconnects when an app is opened. Polls for it and
-	// checks that the Sia app is open.
-	for range 10 {
-		time.Sleep(500 * time.Millisecond)
-
-		n, _, err = openDevice(serial)
-		if err != nil {
-			continue
-		}
-		if _, err := n.GetVersion(); err == nil {
+	// worst case three passes: quit another app, launch the Sia app, confirm
+	// it is in the foreground
+	for range 3 {
+		app, _, err := n.getAppAndVersion()
+		if err == nil && app == appName {
 			return n, nil
 		}
+
+		if err != nil || app == dashboardName {
+			err = n.openApp() // the user confirms the launch on-device
+		} else {
+			err = n.quitApp()
+		}
 		n.Close()
+		// a status word means the device refused, e.g. the user declined the
+		// launch; any other error is the expected disconnect
+		if isStatusErr(err) {
+			return nil, fmt.Errorf("opening the Sia app was declined on the device: %w", err)
+		}
+
+		if n, err = reconnect(serial); err != nil {
+			return nil, err
+		}
 	}
+	n.Close()
 	return nil, errors.New("Sia app did not become ready")
 }
 
